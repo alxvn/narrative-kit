@@ -158,6 +158,12 @@ var InteractablesManager = function (playerName, interactActionTextNodeName, det
 
     this.lastTxt = '';
     this.isTurnOnScheduled = false;
+    /**
+     * Node name of the interactable currently under the crosshair, or ''.
+     * Used by inventory when opening while looking at something.
+     * @type { string }
+     */
+    this.focusedInteractableNodeName = '';
     // this is alternative to test
     this.lastAlternativeNodeToShow = {
         name: '',
@@ -222,6 +228,13 @@ InteractablesManager.prototype.clearInteractables = function () {
     this.interactableHandlers.length = 0;
 }
 
+/**
+ * @returns { string }
+ */
+InteractablesManager.prototype.getFocusedInteractableNodeName = function () {
+    return this.focusedInteractableNodeName || '';
+}
+
 InteractablesManager.prototype.checkInteractables = function () {
     // do not do anything in case disabled
     if (this.mode === InteractablesManagerMode.DISABLED) {
@@ -232,6 +245,7 @@ InteractablesManager.prototype.checkInteractables = function () {
     var msgTxt = '';
     var alternativeNodeToShowName = '';
     var alternativeNodeToShow = null;
+    var focusedInteractableNodeName = '';
 
     if (!this.isPaused) {
         var collisionPointWithWorld = ccbGetCollisionPointOfWorldWithLine(
@@ -289,6 +303,7 @@ InteractablesManager.prototype.checkInteractables = function () {
                         alternativeNodeToShow = interactable.nodeToShow;
                     }
                     msgTxt = interactable.messageText;
+                    focusedInteractableNodeName = interactable.nodeName;
 
                     if (interactable.alternativeInteractKey === null ? isJustPressed(this.interactKey) : isJustPressed(interactable.alternativeInteractKey)) {
                         ccbInvokeAction(interactable.action, interactable.node);
@@ -304,6 +319,8 @@ InteractablesManager.prototype.checkInteractables = function () {
         // TODO: maybe add debug function?
         // print('Raycasts: ' + debugRaycastCount);
     }
+
+    this.focusedInteractableNodeName = focusedInteractableNodeName;
     
     if (this.lastTxt !== msgTxt) {
         this.lastTxt = msgTxt;
@@ -403,6 +420,16 @@ InteractablesManager.prototype.switchToAnotherSceneIfScheduled = function () {
             this.turnOn();
         } else {
             this.sceneToSwitchName = null;
+            // Drop gameplay node refs — they are invalid after leaving the scene
+            this.playerNode = null;
+            this.interactActionTextNode = null;
+            this.crosshairNode = null;
+            this.focusedInteractableNodeName = '';
+            this.lastTxt = '';
+            this.lastAlternativeNodeToShow = {
+                name: '',
+                node: null
+            };
             // it's not required to turnOff since cameras do not exist
             // use turn off only for static/dynamic camera
             this.isPaused = false;
@@ -417,14 +444,24 @@ InteractablesManager.prototype.scheduleInteractableEvent = function (func) {
 
 InteractablesManager.prototype.turnOn = function () {
     this.isPaused = false;
+    if (this.mode !== InteractablesManagerMode.GAMEPLAY) {
+        return;
+    }
     globalCameraManager.switchToPlayerCamera();
-    ccbSetSceneNodeProperty(this.crosshairNode, 'Visible', true);
+    if (this.crosshairNode) {
+        ccbSetSceneNodeProperty(this.crosshairNode, 'Visible', true);
+    }
 }
 
 InteractablesManager.prototype.turnOff = function () {
     this.isPaused = true;
+    if (this.mode !== InteractablesManagerMode.GAMEPLAY) {
+        return;
+    }
     globalCameraManager.switchToStaticCamera();
-    ccbSetSceneNodeProperty(this.crosshairNode, 'Visible', false);
+    if (this.crosshairNode) {
+        ccbSetSceneNodeProperty(this.crosshairNode, 'Visible', false);
+    }
 }
 
 InteractablesManager.prototype.scheduleTurnOn = function () {

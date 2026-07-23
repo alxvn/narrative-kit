@@ -5,6 +5,7 @@
         <property name="successCombination" type="string" default="" />
         <property name="combinationDelimeter" type="string" default="" />
         <property name="errorOnIncorrectCombination" type="bool" default="true" />
+        <property name="preventAlreadyPressedKeys" type="bool" default="false" />
         <property name="delayAfterPinCheck" type="int" default="800" />
         <property name="registerButtons" type="action" default="" />
         <property name="actionOnCombinationCheck" type="action" default="" />
@@ -17,6 +18,7 @@
         <property name="inputFieldNode" type="scenenode" default="" />
         <property name="targetAspect" type="string" default="16:9" />
         <property name="widthFixFolder" type="string" default="width_fix" />
+        <property name="writeUserInputToVariable" type="string" default="PUZZLE_CODE" />
     </behavior>
 */
 
@@ -97,20 +99,37 @@ behavior_NKFlowPuzzle.prototype.main = function (node, timeMs) {
     }
 
     if (this.mouseEventNextFrame && curBtnHovered && curBtnHovered.value !== null) {
-        ccbInvokeAction(this.actionOnKeyPress, node);
-        this.inputFieldCurrentValues.push(curBtnHovered.value);
+        var isAlreadyPressed = this.preventAlreadyPressedKeys
+            && this.inputFieldCurrentValues.indexOf(curBtnHovered.value) !== -1;
 
-        // Not sure
-        if (this.inputFieldCurrentValues.length > this.expectedCombination.length) {
-            this.inputFieldCurrentValues.shift();
-        }
+        if (!isAlreadyPressed) {
+            ccbInvokeAction(this.actionOnKeyPress, node);
+            this.inputFieldCurrentValues.push(curBtnHovered.value);
 
-        if (!this.isSubmitButtonPresented && this.errorOnIncorrectCombination && this.expectedCombination.length === this.inputFieldCurrentValues.length) {
-            this.checkResult(node);
-        }
+            if (this.errorOnIncorrectCombination) {
+                var pressedIdx = this.inputFieldCurrentValues.length - 1;
+                if (this.inputFieldCurrentValues[pressedIdx] !== this.expectedCombination[pressedIdx]) {
+                    this.enabled = false;
+                    ccbInvokeAction(this.actionOnError, node);
+                    setTimeout(function (that) {
+                        that.resetBehavior();
+                    }, this.delayAfterPinCheck, [this]);
+                } else if (!this.isSubmitButtonPresented && this.inputFieldCurrentValues.length === this.expectedCombination.length) {
+                    this.checkResult(node);
+                }
+            } else {
+                if (this.inputFieldCurrentValues.length > this.expectedCombination.length) {
+                    this.inputFieldCurrentValues.shift();
+                }
+                if (!this.isSubmitButtonPresented && this.arraysEqual(this.expectedCombination, this.inputFieldCurrentValues)) {
+                    this.checkResult(node);
+                }
+            }
 
-        if (ccbGetSceneNodeProperty(this.inputFieldNode, 'Type') !== 'unknown') {
-            ccbSetSceneNodeProperty(this.inputFieldNode, 'Text', this.inputFieldCurrentValues.join(''));
+            if (ccbGetSceneNodeProperty(this.inputFieldNode, 'Type') !== 'unknown') {
+                ccbSetSceneNodeProperty(this.inputFieldNode, 'Text', this.inputFieldCurrentValues.join(''));
+            }
+            this.writeInputToVariableFunc();
         }
         this.mouseEventNextFrame = false;
     }
@@ -124,6 +143,7 @@ behavior_NKFlowPuzzle.prototype.main = function (node, timeMs) {
         if (ccbGetSceneNodeProperty(this.inputFieldNode, 'Type') !== 'unknown') {
             ccbSetSceneNodeProperty(this.inputFieldNode, 'Text', this.inputFieldCurrentValues.join(''));
         }
+        this.writeInputToVariableFunc();
         this.mouseEventNextFrame = false;
     }
 
@@ -167,7 +187,7 @@ behavior_NKFlowPuzzle.prototype.checkResult = function (node) {
         setTimeout(function (that, node) {
             ccbInvokeAction(that.actionOnSuccessAfterCheck, node);
             that.resetBehavior();
-        }, this.delayAfterPinCheck, [this], node);
+        }, this.delayAfterPinCheck, [this, node]);
     } else {
         ccbInvokeAction(this.actionOnError, node);
         setTimeout(function (that) {
@@ -253,4 +273,11 @@ behavior_NKFlowPuzzle.prototype.resetBehavior = function () {
     if (ccbGetSceneNodeProperty(this.inputFieldNode, 'Type') !== 'unknown') {
         ccbSetSceneNodeProperty(this.inputFieldNode, 'Text', '');
     }
+    this.writeInputToVariableFunc();
+}
+
+behavior_NKFlowPuzzle.prototype.writeInputToVariableFunc = function () {
+    var separator = '\u001F';
+    var currentInputSerialized = this.inputFieldCurrentValues.join(separator);
+    ccbSetCopperCubeVariable(this.writeUserInputToVariable, currentInputSerialized);
 }

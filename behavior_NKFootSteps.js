@@ -79,6 +79,10 @@ behavior_NKFootSteps.prototype.onAnimate = function (node, timeMs) {
     this.lastTime = timeMs;
     if (delta > 200) delta = 200;
 
+    // this.fakeBobFovShift = parseFloat(ccbGetCopperCubeVariable('footsteps.fovshift'));
+    // this.fakeBobStepTilt = parseFloat(ccbGetCopperCubeVariable('footsteps.steptilt'));
+    // this.strafeDegree = parseFloat(ccbGetCopperCubeVariable('footsteps.tiltangle'));
+
     var isMoving = this.hasAnyTrue(this.moveKeys);
     var curSinValue = Math.sin(this.deltaAcc);
     var curCosValue = Math.cos(this.deltaAcc);

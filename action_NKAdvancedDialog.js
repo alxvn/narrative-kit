@@ -86,41 +86,6 @@ action_NKAdvancedDialog.prototype.execute = function (node) {
     okeEventHandler.registerEvent(dialogFunc);
 }
 
-///**
-// * Lines separated by ||, speaker and text by :|
-// * Example: "Player|: Hello!||Cube|: Yes."
-// * @param { string } dialogJson
-// * @returns { DialogLine[] }
-// */
-//action_NKAdvancedDialog.prototype.parseDialogJson = function (dialogJson) {
-//    if (!dialogJson || dialogJson === '') {
-//        return [];
-//    }
-//
-//    var SPEAKER_SEP = ':|';
-//    var parts = dialogJson.split('||');
-//    var lines = [];
-//    for (var i = 0; i < parts.length; i++) {
-//        if (parts[i] === '') {
-//            continue;
-//        }
-//        var sepIndex = parts[i].indexOf(SPEAKER_SEP);
-//        if (sepIndex !== -1) {
-//            var line = parts[i].substring(sepIndex + SPEAKER_SEP.length);
-//            if (line.length > 0 && line.charAt(0) === ' ') {
-//                line = line.substring(1);
-//            }
-//            lines.push({
-//                speaker: parts[i].substring(0, sepIndex),
-//                line: line
-//            });
-//        } else {
-//            lines.push({ speaker: null, line: parts[i] });
-//        }
-//    }
-//    return lines;
-//}
-
 /**
  * @param { ccbNode } nodeToShow
  * @param { DialogLine[] } lines
