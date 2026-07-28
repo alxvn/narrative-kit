@@ -45,7 +45,7 @@ var nkInventoryItemDefs = {
         name: 'Bullets',
         desc: 'Handgun ammunition.',
         type: 'bullets',
-        stock: 0,
+        stock: 3,
         maxStock: NK_INVENTORY_BULLETS_MAX_STOCK
     }
 };
@@ -64,13 +64,44 @@ var nkInventoryUsageMap = {
         print('NK Inventory: used medic pack (placeholder heal), stock=' + ctx.item.stock);
     },
     '***::bullets': function (ctx) {
-        print('NK Inventory: used bullets (placeholder reload), stock=' + ctx.item.stock);
-    }
+        if (typeof nkGunGetMagFreeSlots !== 'function' || typeof nkGunAddAmmoLoaded !== 'function') {
+            print('NK Inventory: gun ammo API missing, cannot reload');
+            return;
+        }
+        var free = nkGunGetMagFreeSlots();
+        if (free <= 0) {
+            print('NK Inventory: magazine already full');
+            return;
+        }
+        var take = free;
+        if (take > ctx.item.stock) {
+            take = ctx.item.stock;
+        }
+        if (take <= 0) {
+            print('NK Inventory: no spare bullets');
+            return;
+        }
+        ctx.item.stock -= take;
+        nkGunAddAmmoLoaded(take);
+        print('NK Inventory: reloaded ' + take + ' (mag=' + nkGunGetAmmoLoaded() + ', stock=' + ctx.item.stock + ')');
+    },
     // Quest items: add exact keys like 'some_interactable::lighter'
-    // 'candle_unlit::lighter': function (ctx) {
-    //     print('NK Inventory: lit the candle');
-    //     ctx.scheduleReturnToGameplay();
-    // }
+    'oven_trigger::lighter': function (ctx) {
+        var currentKitchenOvenState = ccbGetCopperCubeVariable('KITCHEN_OWEN_STATE');
+        switch (currentKitchenOvenState) {
+            case 'OPEN_NO_FIRE':
+                ccbSetCopperCubeVariable('KITCHEN_OWEN_STATE', 'OPEN_WITH_FIRE')
+                ctx.scheduleReturnToGameplay();
+                break;
+            case 'CLOSED_NO_FIRE':
+                ctx.showMessage("I need to open the oven first.");
+                break;
+            case 'OPEN_WITH_FIRE':
+            case 'CLOSED_WITH_FIRE':
+                ctx.showMessage("The oven is already on fire.");
+                break;
+        }
+    }
 };
 
 /**
@@ -185,6 +216,24 @@ function nkInventoryFormatItemTitle(item) {
 }
 
 /**
+ * Label for the inventory Use button based on selected item.
+ * @param { NkInventoryItem } item
+ * @returns { string }
+ */
+function nkInventoryGetUseButtonLabel(item) {
+    if (!item) {
+        return 'Use';
+    }
+    if (item.id === 'bullets' || item.type === 'bullets') {
+        return 'Reload';
+    }
+    if (item.id === 'medic_pack' || item.type === 'medic') {
+        return 'Cure';
+    }
+    return 'Use';
+}
+
+/**
  * Keep selectedIndex valid for the current visible list.
  */
 function nkInventoryClampSelection() {
@@ -251,7 +300,7 @@ function nkInventoryAddMedicPacks(amount) {
 
 /**
  * Add spare bullets, clamped to max stock.
- * Later this will also count rounds already loaded in the gun toward the cap.
+ * Loaded magazine rounds count toward the same max cap.
  * @param { number } amount
  * @returns { number } amount actually added
  */
@@ -265,8 +314,8 @@ function nkInventoryAddBullets(amount) {
     if (!add || add < 0) {
         add = 0;
     }
-    // TODO: subtract / include ammo currently loaded in the gun when enforcing max
-    var room = item.maxStock - item.stock;
+    var loaded = typeof nkGunGetAmmoLoaded === 'function' ? nkGunGetAmmoLoaded() : 0;
+    var room = item.maxStock - item.stock - loaded;
     if (room < 0) {
         room = 0;
     }
@@ -419,8 +468,11 @@ function nkInventoryScheduleSwitchToScene(sceneName, pointerNodeName, isGameplay
         }
     };
 
-    // turnOff needs live gameplay cameras/crosshair — skip when already in inventory / non-gameplay
-    if (interactablesManager.mode === InteractablesManagerMode.GAMEPLAY) {
+    // Freeze walk cam OR gun cam before leaving the gameplay scene
+    if (
+        interactablesManager.inGunMode ||
+        interactablesManager.mode === InteractablesManagerMode.GAMEPLAY
+    ) {
         interactablesManager.turnOff();
     }
     okeEventHandler.registerEvent(fadeFn);
@@ -660,9 +712,11 @@ behavior_NKInventory.prototype.redraw = function () {
         nkInventoryApplyItemImage(this.nodeSelected, carousel.current.id);
         this.setNodeVisible(this.nodeSelected, true);
         this.setNodeText(this.nodeTitle, nkInventoryFormatItemTitle(carousel.current));
+        this.setNodeText(this.nodeUseBtn, nkInventoryGetUseButtonLabel(carousel.current));
     } else {
         this.setNodeVisible(this.nodeSelected, false);
         this.setNodeText(this.nodeTitle, '');
+        this.setNodeText(this.nodeUseBtn, 'Use');
     }
 
     if (carousel.left) {
@@ -700,6 +754,7 @@ behavior_NKInventory.prototype.useSelectedItem = function () {
 
     var focused = nkInventory.focusedInteractableName || '';
     var handler = nkInventoryResolveUsage(focused, item.id);
+    var self = this;
     var ctx = {
         item: item,
         focusedInteractableName: focused,
@@ -707,17 +762,45 @@ behavior_NKInventory.prototype.useSelectedItem = function () {
         scheduleSwitchToScene: nkInventoryScheduleSwitchToScene,
         removeSelected: function () {
             nkInventoryRemoveItem(item.id);
+        },
+        showMessage: function (text) {
+            self.showMessage(text);
         }
     };
 
     if (handler) {
         handler(ctx);
     } else {
-        print('NK Inventory: cannot use "' + item.id + '" on "' + focused + '"');
+        this.showMessage("That doesn't seem to work.");
     }
 
     nkInventoryClampSelection();
     this.redraw();
+};
+
+/**
+ * Overlay message using look-at folder (desc only; picture + name hidden).
+ * Shares dismiss logic with look-at (click / Esc / I).
+ * @param { string } text
+ */
+behavior_NKInventory.prototype.showMessage = function (text) {
+    if (!this.nodeLookAtFolder) {
+        print('NK Inventory: cannot show message, hud__item_look_at missing');
+        return;
+    }
+
+    this.setNodeText(this.nodeLookAtDesc, text || '');
+    this.setNodeText(this.nodeLookAtName, '');
+
+    this.setNodeVisible(this.nodeLookAtFolder, true);
+    this.setNodeVisible(this.nodeLookAtOverlayBlack, true);
+    this.setNodeVisible(this.nodeLookAtPicture, false);
+    this.setNodeVisible(this.nodeLookAtDesc, true);
+    this.setNodeVisible(this.nodeLookAtName, false);
+
+    this.isLookAtOpen = true;
+    this.lookAtIgnoreClickFrames = 2;
+    this.mouseEventNextFrame = false;
 };
 
 behavior_NKInventory.prototype.showLookAt = function () {

@@ -1,9 +1,10 @@
 // The following embedded xml is for the editor and describes how the action can be edited:
 // Supported types are: int, float, string, bool, color, vect3d, scenenode, texture, action
 /*
-    <action jsname="action_NKRegisterInteractablesManager" description="NK - Register Interactables Manager v2.0">
+    <action jsname="action_NKRegisterInteractablesManager" description="NK - Register Interactables Manager v2.1">
         <property name="playerNodeName" type="string" default="player" />
         <property name="staticCameraNodeName" type="string" default="player__static" />
+        <property name="gunCameraNodeName" type="string" default="player__gun" />
         <property name="crosshairNodeName" type="string" default="crosshair" />
         <property name="interactActionTextNodeName" type="string" default="interactable_message" />
         <property name="detectorDistance" type="float" default="26.0" />
@@ -100,7 +101,7 @@ Object.keys = (function () {
  * @property { any } action
  * @property { string } id
  * @property { string } conditionalVarName
- * @property { string } conditionalVarValue
+ * @property { string } conditionalVarValue  Exact value, or alternatives separated by || (e.g. OPEN||CLOSED)
  * @property { boolean } isInactive
  * @property { string } nodeName
  * @property { ccbNode | null } nodeToShow
@@ -118,7 +119,15 @@ Object.keys = (function () {
 var InteractablesManagerMode = {
     DISABLED: 0,
     GAMEPLAY: 1
-}
+};
+
+var NkCameraKind = {
+    PLAYER: 0,
+    GUN: 1,
+    STATIC: 2
+};
+
+var NK_KEY_SPACE = 32;
 
 var InteractablesManager = function (playerName, interactActionTextNodeName, detectorDistance, interactKey, crosshairNodeName, startWithGameplayScene) {
     this.mode = startWithGameplayScene ? InteractablesManagerMode.GAMEPLAY : InteractablesManagerMode.DISABLED;
@@ -170,6 +179,10 @@ var InteractablesManager = function (playerName, interactActionTextNodeName, det
         node: null
     };
 
+    /** Survivor gun aim mode (3rd camera). IM is DISABLED while true. */
+    this.inGunMode = false;
+    /** After inventory/dialog freeze, restore gun camera instead of FPS. */
+    this.resumeGunMode = false;
 
     if (this.mode === InteractablesManagerMode.GAMEPLAY) {
         /**
@@ -192,7 +205,7 @@ var InteractablesManager = function (playerName, interactActionTextNodeName, det
         this.crosshairNode = null;
         this.isPaused = true;
     }
-}
+};
 
 /**
  * @param { Interactable } interactable 
@@ -287,8 +300,18 @@ InteractablesManager.prototype.checkInteractables = function () {
                 debugRaycastCount += 1;
                 if (isDetected) {
                     // do not even show the message in case interactable variable is set and you don't expect it
+                    // conditionalVarValue may list alternatives: "OPEN||CLOSED"
                     if (interactable.conditionalVarName && interactable.conditionalVarValue) {
-                        if (ccbGetCopperCubeVariable(interactable.conditionalVarName) !== interactable.conditionalVarValue) {
+                        var currentVarValue = ccbGetCopperCubeVariable(interactable.conditionalVarName);
+                        var allowedValues = interactable.conditionalVarValue.split('||');
+                        var matchesConditional = false;
+                        for (var av = 0; av < allowedValues.length; av++) {
+                            if (allowedValues[av] === currentVarValue) {
+                                matchesConditional = true;
+                                break;
+                            }
+                        }
+                        if (!matchesConditional) {
                             continue;
                         }
                     }
@@ -415,9 +438,15 @@ InteractablesManager.prototype.switchToAnotherSceneIfScheduled = function () {
             }
     
             globalCameraManager.resetCameraNodes(this.playerNode);
-    
+            globalCameraManager.resetGunCameraNode();
+
             this.sceneToSwitchName = null;
-            this.turnOn();
+            if (this.resumeGunMode) {
+                this.resumeGunMode = false;
+                this.enterGunMode();
+            } else {
+                this.turnOn();
+            }
         } else {
             this.sceneToSwitchName = null;
             // Drop gameplay node refs — they are invalid after leaving the scene
@@ -430,6 +459,8 @@ InteractablesManager.prototype.switchToAnotherSceneIfScheduled = function () {
                 name: '',
                 node: null
             };
+            // Keep resumeGunMode — needed to restore aim after inventory return
+            this.inGunMode = false;
             // it's not required to turnOff since cameras do not exist
             // use turn off only for static/dynamic camera
             this.isPaused = false;
@@ -442,8 +473,103 @@ InteractablesManager.prototype.scheduleInteractableEvent = function (func) {
     this.interactableActionsEventQueue.push(func);
 }
 
+/**
+ * @returns { boolean }
+ */
+InteractablesManager.prototype.isInGunMode = function () {
+    return !!this.inGunMode;
+};
+
+/**
+ * Walk FPS -> gun aim camera. Disables interactables.
+ */
+InteractablesManager.prototype.enterGunMode = function () {
+    if (!globalCameraManager || !globalCameraManager.gunCameraNode) {
+        print('NK: cannot enter gun mode — gun camera missing (expected player__gun)');
+        return;
+    }
+
+    // Rebind player if we just returned to a gameplay scene
+    if (!this.playerNode) {
+        this.playerNode = ccbGetSceneNodeFromName(this.playerNodeName);
+    }
+    globalCameraManager.resetCameraNodes(this.playerNode);
+    globalCameraManager.resetGunCameraNode();
+
+    globalCameraManager.switchToGunCamera();
+    this.inGunMode = true;
+    this.mode = InteractablesManagerMode.DISABLED;
+    this.isPaused = false;
+    this.focusedInteractableNodeName = '';
+    this.lastTxt = '';
+
+    if (this.crosshairNode) {
+        ccbSetSceneNodeProperty(this.crosshairNode, 'Visible', false);
+    }
+    if (this.interactActionTextNode) {
+        ccbSetSceneNodeProperty(this.interactActionTextNode, 'Visible', false);
+    }
+};
+
+/**
+ * Gun aim -> walk FPS. Re-enables interactables.
+ */
+InteractablesManager.prototype.exitGunMode = function () {
+    if (!this.inGunMode) {
+        return;
+    }
+
+    globalCameraManager.switchGunToPlayerCamera();
+    this.inGunMode = false;
+    this.resumeGunMode = false;
+    this.mode = InteractablesManagerMode.GAMEPLAY;
+    this.isPaused = false;
+
+    this.playerNode = ccbGetSceneNodeFromName(this.playerNodeName);
+    this.interactActionTextNode = ccbGetSceneNodeFromName(this.interactActionTextNodeName);
+    this.crosshairNode = ccbGetSceneNodeFromName(this.crosshairNodeName);
+
+    if (this.crosshairNode) {
+        ccbSetSceneNodeProperty(this.crosshairNode, 'Visible', true);
+    }
+};
+
+/**
+ * Space while walking enters gun mode. Exit is handled by behavior_NKGunMode.
+ */
+InteractablesManager.prototype.handleGunModeHotkey = function () {
+    if (this.inGunMode || this.isPaused) {
+        return this;
+    }
+    if (this.mode !== InteractablesManagerMode.GAMEPLAY) {
+        return this;
+    }
+    if (isJustPressed(NK_KEY_SPACE)) {
+        this.enterGunMode();
+    }
+    return this;
+};
+
 InteractablesManager.prototype.turnOn = function () {
     this.isPaused = false;
+
+    if (this.resumeGunMode) {
+        this.resumeGunMode = false;
+        this.playerNode = ccbGetSceneNodeFromName(this.playerNodeName);
+        this.interactActionTextNode = ccbGetSceneNodeFromName(this.interactActionTextNodeName);
+        this.crosshairNode = ccbGetSceneNodeFromName(this.crosshairNodeName);
+        globalCameraManager.resetCameraNodes(this.playerNode);
+        globalCameraManager.resetGunCameraNode();
+        // Same-scene dialog freeze: aim pose lives on static
+        globalCameraManager.switchStaticToGunCamera();
+        this.inGunMode = true;
+        this.mode = InteractablesManagerMode.DISABLED;
+        if (this.crosshairNode) {
+            ccbSetSceneNodeProperty(this.crosshairNode, 'Visible', false);
+        }
+        return;
+    }
+
     if (this.mode !== InteractablesManagerMode.GAMEPLAY) {
         return;
     }
@@ -451,22 +577,31 @@ InteractablesManager.prototype.turnOn = function () {
     if (this.crosshairNode) {
         ccbSetSceneNodeProperty(this.crosshairNode, 'Visible', true);
     }
-}
+};
 
 InteractablesManager.prototype.turnOff = function () {
     this.isPaused = true;
+
+    // Freeze from gun camera (inventory / dialog while aiming)
+    if (this.inGunMode) {
+        this.resumeGunMode = true;
+        globalCameraManager.switchToStaticCamera();
+        return;
+    }
+
     if (this.mode !== InteractablesManagerMode.GAMEPLAY) {
         return;
     }
+    this.resumeGunMode = false;
     globalCameraManager.switchToStaticCamera();
     if (this.crosshairNode) {
         ccbSetSceneNodeProperty(this.crosshairNode, 'Visible', false);
     }
-}
+};
 
 InteractablesManager.prototype.scheduleTurnOn = function () {
     this.isTurnOnScheduled = true;
-}
+};
 
 InteractablesManager.prototype.turnOnIfScheduled = function () {
     if (this.isTurnOnScheduled) {
@@ -476,7 +611,7 @@ InteractablesManager.prototype.turnOnIfScheduled = function () {
         }
     }
     return this;
-}
+};
 
 function okeMouseDownListener(keyCode) {
     if (!globalKeyState) return;
@@ -516,59 +651,180 @@ function isJustPressed(keyCode) {
     return isJustPressed;
 }
 
-var CameraManager = function (playerCameraNodeName, staticCameraNodeName) {
+var CameraManager = function (playerCameraNodeName, staticCameraNodeName, gunCameraNodeName) {
     this.playerCameraNodeName = playerCameraNodeName;
     this.staticCameraNodeName = staticCameraNodeName;
+    this.gunCameraNodeName = gunCameraNodeName || 'player__gun';
 
     this.playerCameraNode = ccbGetSceneNodeFromName(this.playerCameraNodeName);
     this.staticCameraNode = ccbGetSceneNodeFromName(this.staticCameraNodeName);
+    this.gunCameraNode = ccbGetSceneNodeFromName(this.gunCameraNodeName);
 
+    this.activeKind = NkCameraKind.PLAYER;
     this.directionKeys = [87, 65, 83, 68, 38, 37, 40, 39];
-}
+
+    if (this.gunCameraNode) {
+        ccbSetSceneNodeProperty(this.gunCameraNode, 'Visible', false);
+    }
+};
 
 CameraManager.prototype.resetCameraNodes = function (playerNode) {
     this.playerCameraNode = playerNode;
     this.staticCameraNode = ccbGetSceneNodeFromName(this.staticCameraNodeName);
-}
+};
 
-CameraManager.prototype.switchToStaticCamera = function () {
-    var targetPos = ccbGetSceneNodeProperty(this.playerCameraNode, 'Position');
-    var targetRot = ccbGetSceneNodeProperty(this.playerCameraNode, 'Rotation');
-    var targetTar = ccbGetSceneNodeProperty(this.playerCameraNode, 'Target');
-    var targetUpv = ccbGetSceneNodeProperty(this.playerCameraNode, 'UpVector');
+CameraManager.prototype.resetGunCameraNode = function () {
+    this.gunCameraNode = ccbGetSceneNodeFromName(this.gunCameraNodeName);
+};
 
+CameraManager.prototype.releaseMovementKeys = function () {
     for (var i = 0; i < this.directionKeys.length; i++) {
         ccbEmulateKey(this.directionKeys[i], false);
     }
+};
 
-    ccbSetSceneNodeProperty(this.staticCameraNode, 'Position', targetPos);
-    ccbSetSceneNodeProperty(this.staticCameraNode, 'Rotation', targetRot);
-    ccbSetSceneNodeProperty(this.staticCameraNode, 'Target', targetTar);
-    ccbSetSceneNodeProperty(this.staticCameraNode, 'UpVector', targetUpv);
+/**
+ * @param { scenenode } fromNode
+ * @param { scenenode } toNode
+ */
+CameraManager.prototype.copyPose = function (fromNode, toNode) {
+    if (!fromNode || !toNode) {
+        return;
+    }
+    ccbSetSceneNodeProperty(toNode, 'Position', ccbGetSceneNodeProperty(fromNode, 'Position'));
+    ccbSetSceneNodeProperty(toNode, 'Rotation', ccbGetSceneNodeProperty(fromNode, 'Rotation'));
+    ccbSetSceneNodeProperty(toNode, 'Target', ccbGetSceneNodeProperty(fromNode, 'Target'));
+    ccbSetSceneNodeProperty(toNode, 'UpVector', ccbGetSceneNodeProperty(fromNode, 'UpVector'));
+};
+
+/**
+ * Gameplay camera to freeze onto static — never the static cam itself.
+ * Important for MovePlayerWithFade, which relocates the player then calls
+ * switchToStaticCamera again while already frozen.
+ */
+CameraManager.prototype.getFreezeSourceCamera = function () {
+    if (
+        this.gunCameraNode &&
+        (
+            this.activeKind === NkCameraKind.GUN ||
+            (typeof interactablesManager !== 'undefined' && interactablesManager && interactablesManager.inGunMode)
+        )
+    ) {
+        return this.gunCameraNode;
+    }
+    return this.playerCameraNode;
+};
+
+CameraManager.prototype.switchToStaticCamera = function () {
+    var source = this.getFreezeSourceCamera();
+    this.releaseMovementKeys();
+    this.copyPose(source, this.staticCameraNode);
+
+    if (this.playerCameraNode) {
+        ccbSetSceneNodeProperty(this.playerCameraNode, 'Visible', false);
+    }
+    if (this.gunCameraNode) {
+        ccbSetSceneNodeProperty(this.gunCameraNode, 'Visible', false);
+    }
+    if (this.staticCameraNode) {
+        ccbSetSceneNodeProperty(this.staticCameraNode, 'Visible', true);
+    }
+
     ccbSetActiveCamera(this.staticCameraNode);
-}
+    this.activeKind = NkCameraKind.STATIC;
+};
 
 CameraManager.prototype.switchToPlayerCamera = function () {
-    var targetPos = ccbGetSceneNodeProperty(this.staticCameraNode, 'Position');
-    var targetRot = ccbGetSceneNodeProperty(this.staticCameraNode, 'Rotation');
-    var targetTar = ccbGetSceneNodeProperty(this.staticCameraNode, 'Target');
-    var targetUpv = ccbGetSceneNodeProperty(this.staticCameraNode, 'UpVector');
-    ccbSetSceneNodeProperty(this.playerCameraNode, 'Position', targetPos);
-    ccbSetSceneNodeProperty(this.playerCameraNode, 'Rotation', targetRot);
-    ccbSetSceneNodeProperty(this.playerCameraNode, 'Target', targetTar);
-    ccbSetSceneNodeProperty(this.playerCameraNode, 'UpVector', targetUpv);
-    
-    // prevent rotation based on mouse pos
+    this.copyPose(this.staticCameraNode, this.playerCameraNode);
+
+    if (this.gunCameraNode) {
+        ccbSetSceneNodeProperty(this.gunCameraNode, 'Visible', false);
+    }
+    if (this.staticCameraNode) {
+        ccbSetSceneNodeProperty(this.staticCameraNode, 'Visible', false);
+    }
+    if (this.playerCameraNode) {
+        ccbSetSceneNodeProperty(this.playerCameraNode, 'Visible', true);
+    }
+
     ccbSetMousePos(
         ccbGetScreenWidth() / 2,
         ccbGetScreenHeight() / 2
-    )
+    );
 
     ccbSetActiveCamera(this.playerCameraNode);
-
-    // cursor somehow appears if switch scenes
+    this.activeKind = NkCameraKind.PLAYER;
     ccbSetCursorVisible(false);
-}
+};
+
+CameraManager.prototype.switchToGunCamera = function () {
+    if (!this.gunCameraNode) {
+        print('NK CameraManager: gun camera node not found');
+        return;
+    }
+
+    this.releaseMovementKeys();
+    this.copyPose(this.playerCameraNode, this.gunCameraNode);
+
+    if (this.playerCameraNode) {
+        ccbSetSceneNodeProperty(this.playerCameraNode, 'Visible', false);
+    }
+    if (this.staticCameraNode) {
+        ccbSetSceneNodeProperty(this.staticCameraNode, 'Visible', false);
+    }
+    ccbSetSceneNodeProperty(this.gunCameraNode, 'Visible', true);
+
+    ccbSetActiveCamera(this.gunCameraNode);
+    this.activeKind = NkCameraKind.GUN;
+    ccbSetCursorVisible(false);
+};
+
+CameraManager.prototype.switchGunToPlayerCamera = function () {
+    if (!this.gunCameraNode) {
+        return;
+    }
+
+    this.copyPose(this.gunCameraNode, this.playerCameraNode);
+
+    ccbSetSceneNodeProperty(this.gunCameraNode, 'Visible', false);
+    if (this.staticCameraNode) {
+        ccbSetSceneNodeProperty(this.staticCameraNode, 'Visible', false);
+    }
+    if (this.playerCameraNode) {
+        ccbSetSceneNodeProperty(this.playerCameraNode, 'Visible', true);
+    }
+
+    ccbSetMousePos(
+        ccbGetScreenWidth() / 2,
+        ccbGetScreenHeight() / 2
+    );
+
+    ccbSetActiveCamera(this.playerCameraNode);
+    this.activeKind = NkCameraKind.PLAYER;
+    ccbSetCursorVisible(false);
+};
+
+/** Resume aim after same-scene freeze (static holds the aim pose). */
+CameraManager.prototype.switchStaticToGunCamera = function () {
+    if (!this.gunCameraNode) {
+        print('NK CameraManager: gun camera node not found');
+        return;
+    }
+
+    this.copyPose(this.staticCameraNode, this.gunCameraNode);
+
+    if (this.playerCameraNode) {
+        ccbSetSceneNodeProperty(this.playerCameraNode, 'Visible', false);
+    }
+    if (this.staticCameraNode) {
+        ccbSetSceneNodeProperty(this.staticCameraNode, 'Visible', false);
+    }
+    ccbSetSceneNodeProperty(this.gunCameraNode, 'Visible', true);
+
+    ccbSetActiveCamera(this.gunCameraNode);
+    this.activeKind = NkCameraKind.GUN;
+    ccbSetCursorVisible(false);
+};
 
 /**
  * @type { InteractablesManager }
@@ -597,7 +853,8 @@ action_NKRegisterInteractablesManager.prototype.execute = function (node) {
     if (!globalCameraManager) {
         globalCameraManager = new CameraManager(
             this.playerNodeName,
-            this.staticCameraNodeName
+            this.staticCameraNodeName,
+            this.gunCameraNodeName
         );
     }
 
@@ -621,6 +878,7 @@ action_NKRegisterInteractablesManager.prototype.execute = function (node) {
             globalKeyState.pendingJustPressed = {};
 
             interactablesManager
+                .handleGunModeHotkey()
                 .updatePlayerAndDetectorPositions()
                 .checkInteractables()
                 .switchToAnotherSceneIfScheduled()
